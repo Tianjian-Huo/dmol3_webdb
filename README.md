@@ -16,7 +16,7 @@ Run the `dmol2db.py` script and specify the folder containing DMol3 results:
 运行 `dmol2db.py` 脚本，并输入需要遍历的包含 DMol3 结果的文件夹：
 
 ```bash
-python dmol2db.py /path/to/dmol3/results
+python dmol2db.py
 ```
 
 This will parse the DMol3 output and export the results into `DMOL_RESULTS.db`.
@@ -29,7 +29,7 @@ Run `merge_db.py` to merge the `DMOL_RESULTS.db` file into `DATABASE.db`:
 运行 `merge_db.py`，将 `DMOL_RESULTS.db` 合并到 `DATABASE.db`：
 
 ```bash
-python merge_db.py
+python tool_merge_db.py
 ```
 
 This will update `DATABASE.db` with new data from `DMOL_RESULTS.db`.
@@ -43,8 +43,8 @@ This will update `DATABASE.db` with new data from `DMOL_RESULTS.db`.
 ```
 dmol_webdb/
 │── dmol2db.py            # Parses DMol3 results and generates DMOL_RESULTS.db 解析 DMol3 结果并生成数据库
-│── merge_db.py           # Merges DMOL_RESULTS.db into DATABASE.db 合并数据库
-│
+│── tool_merge_db.py           # Merges DMOL_RESULTS.db into DATABASE.db 合并数据库
+│── tool_db2csv.py           # db to csv 数据库转换为csv文件
 ├── lib/
 │   ├── extract_parameters.py  # Extracts required parameters from DMol3 results 提取参数
 │   ├── save_to_db.py          # Saves extracted data into SQLite database 保存数据到 SQLite
