@@ -44,7 +44,7 @@ This will update `DATABASE.db` with new data from `DMOL_RESULTS.db`.
 dmol_webdb/
 │── dmol2db.py            # Parses DMol3 results and generates DMOL_RESULTS.db 解析 DMol3 结果并生成数据库
 │── tool_merge_db.py           # Merges DMOL_RESULTS.db into DATABASE.db 合并数据库
-│── tool_db2csv.py           # db to csv 数据库转换为csv文件
+│── tool_db2csv.py            # db to csv 数据库转换为csv文件
 ├── lib/
 │   ├── extract_parameters.py  # Extracts required parameters from DMol3 results 提取参数
 │   ├── save_to_db.py          # Saves extracted data into SQLite database 保存数据到 SQLite

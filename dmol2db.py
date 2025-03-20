@@ -2,8 +2,15 @@ import os
 import re
 import datetime
 import sqlite3
+import numpy as np
+from pymatgen.core import Molecule
+from pymatgen.analysis.molecule_matcher import HungarianOrderMatcher, KabschMatcher
 from lib.extract_parameters import extract_parameters
 from lib.save_to_db import save_to_db
+from lib.calculate_dos import plot_dos
+from lib.calculate_dos import read_eigenvalues
+from collections import Counter
+from pymatgen.core import Composition
 
 # 生成时间戳文件名
 timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
@@ -17,162 +24,128 @@ def log_message(message):
     
     print(full_message)  
     with open(log_filename, "a", encoding="utf-8") as log_file:
-        log_file.write(full_message + "\n")    
+        log_file.write(full_message + "\n")
 
+def get_all_search_folders(root_dir):
+    """递归查找所有包含 search 目录的路径"""
+    search_folders = []
+    for dirpath, dirnames, _ in os.walk(root_dir):
+        if "search" in dirnames:
+            search_folders.append(os.path.join(dirpath, "search"))
+    return search_folders
 
-def get_target_energy_line(energy_file):
-    """解析 energy.txt，获取最后优化的 step 号及对应 init 号（若为 step 0）。"""
-    with open(energy_file, 'r') as f:
-        lines = f.readlines()
+def get_all_outmol_files(search_dir):
+    """
+    遍历 search 目录，查找所有 dmol.outmol 文件。
+    返回 (文件路径, Molecule, TOTEN) 列表
+    """
+    outmol_files = []
+    for root, _, files in os.walk(search_dir):
+        for file in files:
+            if file == "dmol.outmol":
+                file_path = os.path.join(root, file)
+                
+                # 解析 dmol.outmol 文件
+                parameters, atom_species, atom_positions = extract_parameters(file_path)
+                
+                if parameters and "TOTEN" in parameters:
+                    molecule = get_molecule_from_outmol(file_path)
+                    
+                    if molecule:
+                        outmol_files.append((file_path, molecule, parameters["TOTEN"]))
+                        log_message(f"✅ 发现 dmol.outmol: {file_path}, TOTEN: {parameters['TOTEN']} eV")
 
-    last_line = lines[-1].split(":")
-    last_energy = float(last_line[1].split()[1])  
-    last_step_number = int(last_line[0])  
+    return outmol_files
 
-    last_matching_step = last_step_number  
+def get_molecule_from_outmol(dmol_outmol_path):
+    """解析 dmol.outmol 并构建 pymatgen 的 Molecule 对象"""
+    parameters, atom_species, atom_positions = extract_parameters(dmol_outmol_path)
+    if not atom_species or not atom_positions:
+        return None
+    return Molecule(atom_species, np.array(atom_positions))
 
-    for i in range(len(lines) - 2, -1, -1):  
-        parts = lines[i].split(":")
-        if len(parts) > 1:
-            step_energy = float(parts[1].split()[1])
-            step_number = int(parts[0])
+def cluster_similar_structures(outmol_files, rmsd_cutoff=0.2):
+    """
+    根据 RMSD 相似度筛选结构，每组相似结构中仅保留能量最低的。
+    :param outmol_files: [(文件路径, Molecule, TOTEN), ...]
+    :param rmsd_cutoff: 相似度阈值
+    :return: 选中的结构列表 [(文件路径, Molecule, TOTEN)]
+    """
+    selected_structures = []
+    grouped_structures = []
 
-            if step_energy == last_energy:
-                last_matching_step = step_number
-            else:
-                break  
+    for file_path, molecule, energy in outmol_files:
+        added = False
+        for group in grouped_structures:
+            ref_molecule, ref_energy = group[0][1], group[0][2]
 
-    init_number = None
-    if last_matching_step == 0:
-        first_line_parts = lines[0].split(":")
-        if len(first_line_parts) > 1:
-            init_number = int(first_line_parts[1].split()[0])  
+            # 计算相似度
+            hungarian_matcher = HungarianOrderMatcher(ref_molecule)
+            hungarian_rmsd = hungarian_matcher.fit(molecule)[-1]
 
-    return last_matching_step, init_number
+            kabsch_matcher = KabschMatcher(ref_molecule)
+            kabsch_rmsd = kabsch_matcher.fit(molecule)[-1]
 
+            rmsd = min(hungarian_rmsd, kabsch_rmsd)
 
-def update_energy_file(energy_file, last_failed_step):
-    """在 energy.txt 中回溯查找更早的 step 号，优先相同能量的 step，若无则回溯到不同能量的 step。"""
-    with open(energy_file, 'r') as f:
-        lines = f.readlines()
-
-    last_energy = None
-    matching_steps = []
-
-    for line in lines:
-        parts = line.split(":")
-        if len(parts) > 1:
-            step_number = int(parts[0])
-            step_energy = float(parts[1].split()[1])
-
-            if step_number == last_failed_step:
-                last_energy = step_energy
+            if rmsd < rmsd_cutoff:
+                group.append((file_path, molecule, energy))
+                added = True
                 break
 
-    if last_energy is None:
-        return None  
+        if not added:
+            grouped_structures.append([(file_path, molecule, energy)])
 
-    found_new_step = False
-    for i in range(len(lines) - 2, -1, -1):
-        parts = lines[i].split(":")
-        if len(parts) > 1:
-            step_number = int(parts[0])
-            step_energy = float(parts[1].split()[1])
+    # 仅保留能量最低的
+    for group in grouped_structures:
+        best_structure = min(group, key=lambda x: x[2])
+        selected_structures.append(best_structure)
+        log_message(f"🔹 选择最低能量结构: {best_structure[0]}，TOTEN: {best_structure[2]} eV")
 
-            if step_energy == last_energy and step_number < last_failed_step:
-                matching_steps.append(step_number)
-                found_new_step = True
-            elif found_new_step:
-                break  
+    return selected_structures
 
-    if matching_steps:
-        return matching_steps[-1]
+def process_search_folder(search_dir):
+    """处理单个 search 目录"""
+    log_message(f"📌 开始处理 {search_dir} ...")
 
-    for i in range(len(lines) - 2, -1, -1):
-        parts = lines[i].split(":")
-        if len(parts) > 1:
-            step_number = int(parts[0])
-            step_energy = float(parts[1].split()[1])
+    outmol_files = get_all_outmol_files(search_dir)
 
-            if step_number < last_failed_step:
-                return step_number  
+    if not outmol_files:
+        log_message(f"❌ {search_dir} 未找到 dmol.outmol 文件，跳过")
+        return
 
-    return None  
+    selected_structures = cluster_similar_structures(outmol_files)
 
-
-def get_step_folder(log_file, target_step, init_number=None):
-    """从 log.txt 获取对应 step 的计算文件夹。"""
-    with open(log_file, 'r') as f:
-        lines = f.readlines()
-
-    if target_step == 0 and init_number is not None:
-        pattern = rf"init\s+{init_number}\b"
-    else:
-        pattern = rf"step\s+{target_step}\b"
-
-    folder_name = None
-    found_step = False
-
-    for i, line in enumerate(lines):
-        if re.search(pattern, line):
-            found_step = True
-            continue
-
-        if found_step:
-            if line.strip() == "" or re.match(r"step\s+\d+", line) or re.match(r"init\s+\d+", line):
-                break  
-
-            if "folder name:" in line:
-                folder_name = line.split(":")[1].strip()
-
-    return folder_name
-
-
-def process_energy_file(energy_file):
-    """处理 energy.txt，找到最佳 step，提取 dmol.outmol 并存入数据库。"""
-    base_dir = os.path.dirname(energy_file)
-    log_file = os.path.join(base_dir, "log.txt")
-
-    if not os.path.isfile(log_file):
-        return  
-
-    last_failed_step = None
-
-    while True:
-        if last_failed_step is None:
-            target_step, init_number = get_target_energy_line(energy_file)
-        else:
-            target_step = update_energy_file(energy_file, last_failed_step)
-            init_number = None
-
-        if target_step is None:
-            return  
-
-        if target_step == last_failed_step:
-            return  
-
-        last_failed_step = target_step  
-
-        folder_name = get_step_folder(log_file, target_step, init_number)
-        if folder_name is None:
-            log_message(f"{base_dir} 未找到对应步骤的文件夹名，跳过")
-            return  
-
-        dmol_outmol_path = os.path.join(base_dir, folder_name, "dmol.outmol")
-
-        if not os.path.isfile(dmol_outmol_path):
-            continue  
-
-        parameters, atom_species, atom_positions = extract_parameters(dmol_outmol_path)
+    for i, (file_path, molecule, energy) in enumerate(selected_structures, start=1):
+        parameters, atom_species, atom_positions = extract_parameters(file_path)
 
         if parameters and atom_species and atom_positions:
-            new_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_filename)
-            save_to_db(new_db_path, parameters, atom_species, atom_positions)
-            relative_path = os.path.relpath(base_dir, os.path.dirname(os.path.abspath(__file__)))
-            log_message(f"{relative_path} 提取成功")
-            return
+            # **统计每种元素数量**
+            element_counts = Counter(atom_species)
 
-    log_message(f"{base_dir} 提取失败，未存入数据库")
+            # **使用 pymatgen 生成标准化化学式**
+            formula = Composition(element_counts).formula.replace(" ", "")  # 去除空格
+
+            # **生成带编号的文件名**
+            filename = f"{formula}_{i}"  # 例如 'Ca2S2_1'
+
+            # **存入参数**
+            parameters["filename"] = filename
+
+            # **保存到数据库**
+            save_to_db(db_filename, parameters, atom_species, atom_positions)
+            log_message(f"✅ 成功存入数据库: {file_path}，Filename: {filename}")
+
+            # # **提取电子能级**
+            # eigenvalues, occupations = read_eigenvalues(file_path)
+
+            # # **如果电子能级数据不为空，则绘制 DOS**
+            # if len(eigenvalues) > 0:
+            #     dos_output_path = os.path.join("dmol_dos", f"{filename}.png")
+            #     plot_dos(file_path, dos_output_path)
+            #     log_message(f"📊 DOS 图已保存: {dos_output_path}")
+            # else:
+            #     log_message(f"❌ {file_path}: 电子能级数据为空，跳过绘制")
 
 
 def get_db_row_count(db_path):
@@ -187,25 +160,26 @@ def get_db_row_count(db_path):
     return count
 
 if __name__ == '__main__':
-    root_dir = input("请输入要遍历的目录路径: ").strip()
+    root_dir = input("请输入包含 search 目录的根路径: ").strip()
 
     if not os.path.isdir(root_dir):
         print(f"错误: 目录 {root_dir} 不存在！请检查路径。")
         exit(1)
 
-    print(f"\n开始遍历目录: {root_dir}\n")
+    print(f"\n🔍 开始遍历 {root_dir} 下的所有 search 目录...\n")
 
-    for dirpath, _, filenames in os.walk(root_dir):
-        if "energy.txt" in filenames:
-            energy_file_path = os.path.join(dirpath, "energy.txt")
-            process_energy_file(energy_file_path)
+    search_folders = get_all_search_folders(root_dir)
 
-    # **在 DMOL 数据提取完成前，添加一个空行**
-    log_message("")  
+    if not search_folders:
+        print("❌ 未找到任何 search 目录，退出")
+        exit(1)
+
+    for search_dir in search_folders:
+        process_search_folder(search_dir)
 
     # **获取数据库行数**
     row_count = get_db_row_count(db_filename)
-    log_message(f"DMOL 数据提取完成: {db_filename}，总行数: {row_count}")
+    log_message(f"\n✅ DMOL 数据提取完成: {db_filename}，总行数: {row_count}")
 
     # **提示日志文件**
-    log_message(f"日志文件已保存: {log_filename}")
+    log_message(f"📄 日志文件已保存: {log_filename}")
