@@ -108,14 +108,16 @@ def extract_parameters(dmol_outmol_path):
     # **固定计算方法**
     parameters["Calculator"] = "dmol"
 
-    # **计算分子的点群**
-    try:
-        mol = Molecule(atom_species, atom_positions)
-        pg_analyzer = PointGroupAnalyzer(mol)
-        parameters["Point_Group"] = f'"{pg_analyzer.get_pointgroup()}"'  
-    except Exception as e:
-        parameters["Point_Group"] = '"Unknown"'
-        print(f"⚠️ 点群计算失败: {e}")
+    mol = Molecule(atom_species, atom_positions)
+
+    # 获取点群
+    pga = PointGroupAnalyzer(mol)
+    point_group = pga.sch_symbol  # ← ✅ 这个是最兼容的方式，返回类似 "D3h", "C2v" 的字符串
+    # 修正某些字符错误
+    if point_group == "C*v":
+        point_group = "C∞v"
+
+    parameters["Point_Group"] = point_group
 
     parameters['Functional'] = "PBE"
 
